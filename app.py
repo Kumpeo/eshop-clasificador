@@ -7,26 +7,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import seaborn as sns
 import warnings
+import io
 warnings.filterwarnings("ignore")
 
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.metrics import (
-    accuracy_score, roc_auc_score, roc_curve,
-    confusion_matrix, classification_report,
-    silhouette_score
-)
+from sklearn.metrics import silhouette_score
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-import io
 
-# ── Importar módulos internos ──
 from modelo import ClasificadorIntención
 from visualizaciones import (
     fig_roc, fig_confusion, fig_modelos, fig_importancias,
@@ -43,47 +32,18 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── CSS personalizado ──
 st.markdown("""
 <style>
-/* Encabezado hero */
 .hero {
     background: linear-gradient(135deg, #1C3A5E 0%, #2E86AB 100%);
-    border-radius: 12px;
-    padding: 2rem 2.5rem;
-    margin-bottom: 1.5rem;
-    color: white;
+    border-radius: 12px; padding: 2rem 2.5rem;
+    margin-bottom: 1.5rem; color: white;
 }
 .hero h1 { font-size: 1.9rem; margin: 0 0 .4rem; font-weight: 700; }
 .hero p  { font-size: 1rem; opacity: .85; margin: 0; }
-
-/* KPI cards */
-.kpi-card {
-    background: var(--background-color);
-    border-radius: 10px;
-    padding: 1rem 1.2rem;
-    text-align: center;
-    border-left: 4px solid;
-}
-.kpi-val  { font-size: 1.9rem; font-weight: 700; margin: 0; }
-.kpi-label{ font-size: .78rem; color: #7FB3D3; margin: 0; text-transform: uppercase; letter-spacing: .04em; }
-
-/* Badge */
-.badge {
-    display: inline-block;
-    font-size: .72rem; font-weight: 600;
-    padding: 3px 10px; border-radius: 99px;
-    letter-spacing: .03em;
-}
-.badge-alta  { background: #d1fae5; color: #065f46; }
-.badge-baja  { background: #f1f5f9; color: #475569; }
-.badge-blue  { background: #dbeafe; color: #1e40af; }
-
-/* Resultado predicción */
 .result-box {
     border-radius: 12px; padding: 1.5rem;
-    text-align: center; margin-top: .5rem;
-    border: 2px solid;
+    text-align: center; margin-top: .5rem; border: 2px solid;
 }
 .result-alta { background: #d1fae5; border-color: #10b981; }
 .result-baja { background: #f8fafc; border-color: #cbd5e1; }
@@ -94,16 +54,58 @@ st.markdown("""
 
 
 # ══════════════════════════════════════════════════════════════════
+#  FUNCIÓN DATASET DEMO — definida ANTES de usarse
+# ══════════════════════════════════════════════════════════════════
+@st.cache_data(show_spinner=False)
+def _generar_dataset_demo():
+    rng = np.random.default_rng(42)
+    n_sesiones = 5_000
+    clicks_por_ses = rng.integers(1, 25, n_sesiones)
+    records = []
+    for sid, n_cl in enumerate(clicks_por_ses):
+        cat   = rng.integers(1, 5, n_cl)
+        color = rng.integers(1, 15, n_cl)
+        price = rng.uniform(18, 82, n_cl)
+        page  = rng.integers(1, 6, n_cl)
+        order = np.arange(1, n_cl + 1)
+        photo = rng.integers(1, 3, n_cl)
+        mes   = rng.integers(4, 9, n_cl)
+        p2    = (price > price.mean()).astype(int) + 1
+        mc    = [f"M{rng.integers(1,220)}" for _ in range(n_cl)]
+        for i in range(n_cl):
+            records.append({
+                "session ID": sid, "order": order[i],
+                "page 1 (main category)": cat[i],
+                "page 2 (clothing model)": mc[i],
+                "colour": color[i], "price": round(float(price[i]), 2),
+                "page": page[i], "model photography": photo[i],
+                "month": mes[i], "price 2": p2[i],
+            })
+    return pd.DataFrame(records)
+
+
+@st.cache_data(show_spinner=False)
+def entrenar_modelo(df_json, algo, n_estimadores, max_depth, test_size):
+    df  = pd.read_json(io.StringIO(df_json))
+    clf = ClasificadorIntención()
+    clf.df = df
+    clf._construir_sesiones()
+    metricas = clf.entrenar(
+        algoritmo=algo,
+        n_estimators=n_estimadores,
+        max_depth=max_depth,
+        test_size=test_size / 100,
+    )
+    return clf, metricas
+
+
+# ══════════════════════════════════════════════════════════════════
 #  ESTADO DE SESIÓN
 # ══════════════════════════════════════════════════════════════════
-if "clf" not in st.session_state:
-    st.session_state.clf = None
-if "metricas" not in st.session_state:
-    st.session_state.metricas = None
-if "sesiones" not in st.session_state:
-    st.session_state.sesiones = None
-if "entrenado" not in st.session_state:
-    st.session_state.entrenado = False
+if "clf"      not in st.session_state: st.session_state.clf      = None
+if "metricas" not in st.session_state: st.session_state.metricas = None
+if "sesiones" not in st.session_state: st.session_state.sesiones = None
+if "entrenado" not in st.session_state: st.session_state.entrenado = False
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -114,51 +116,41 @@ with st.sidebar:
     st.markdown("**Taller de Aplicaciones**  \nMagister Data Science · USS")
     st.divider()
 
-    # ── Carga de datos ──
     st.markdown("### 📂 Datos")
     fuente = st.radio(
         "Fuente del dataset",
         ["Usar dataset de ejemplo (integrado)", "Subir CSV propio"],
-        label_visibility="collapsed"
+        label_visibility="collapsed",
     )
 
     df_raw = None
-
     if fuente == "Subir CSV propio":
         csv_file = st.file_uploader(
-            "e-shop_clothing_2008.csv",
-            type=["csv"],
+            "e-shop_clothing_2008.csv", type=["csv"],
             help="Separador: punto y coma (;)"
         )
         if csv_file:
             df_raw = pd.read_csv(csv_file, sep=";")
             st.success(f"✅ {len(df_raw):,} clicks cargados")
     else:
-        # Dataset de ejemplo (generado sintéticamente con la misma distribución)
         df_raw = _generar_dataset_demo()
-        st.info("📊 Dataset demo cargado (5.000 sesiones sintéticas)")
+        st.info("📊 Dataset demo (5.000 sesiones sintéticas)")
 
     st.divider()
-
-    # ── Algoritmo ──
     st.markdown("### 🤖 Algoritmo")
     algoritmo = st.selectbox(
         "Modelo",
         ["Gradient Boosting", "Random Forest", "Árbol de Decisión"],
-        label_visibility="collapsed"
+        label_visibility="collapsed",
     )
 
-    # ── Hiperparámetros rápidos ──
     with st.expander("⚙️ Hiperparámetros"):
-        n_est  = st.slider("N° estimadores", 50, 300, 100, 50)
-        max_d  = st.slider("Profundidad máxima", 2, 10, 4)
-        test_s = st.slider("% datos de test", 10, 40, 30, 5)
+        n_est  = st.slider("N° estimadores",    50, 300, 100, 50)
+        max_d  = st.slider("Profundidad máxima", 2,  10,   4)
+        test_s = st.slider("% datos de test",   10,  40,  30,  5)
 
-    # ── Botón entrenar ──
-    entrenar_btn = st.button(
-        "▶ Entrenar modelo",
-        type="primary", use_container_width=True
-    )
+    entrenar_btn = st.button("▶ Entrenar modelo", type="primary",
+                              use_container_width=True)
 
     if st.session_state.entrenado:
         m = st.session_state.metricas
@@ -171,68 +163,14 @@ with st.sidebar:
     st.divider()
     st.markdown(
         "<small>Dataset: E-Shop Clothing 2008 · UCI ML Repository  \n"
-        "Magister Data Science · USS · Taller de Aplicaciones</small>",
-        unsafe_allow_html=True
+        "Magister Data Science · USS</small>",
+        unsafe_allow_html=True,
     )
-
-
-# ══════════════════════════════════════════════════════════════════
-#  FUNCIÓN: DATASET DEMO
-# ══════════════════════════════════════════════════════════════════
-@st.cache_data
-def _generar_dataset_demo():
-    """Genera un dataset sintético con la misma distribución que el original."""
-    rng = np.random.default_rng(42)
-    N   = 35_000   # clicks
-    n_sesiones = 5_000
-
-    clicks_por_ses = rng.integers(1, 25, n_sesiones)
-    records = []
-    for sid, n_cl in enumerate(clicks_por_ses):
-        cat   = rng.integers(1, 5, n_cl)
-        color = rng.integers(1, 15, n_cl)
-        price = rng.uniform(18, 82, n_cl)
-        page  = rng.integers(1, 6, n_cl)
-        order = np.arange(1, n_cl+1)
-        photo = rng.integers(1, 3, n_cl)
-        mes   = rng.integers(4, 9, n_cl)
-        p2    = (price > price.mean()).astype(int) + 1
-        model_codes = [f"M{rng.integers(1,220)}" for _ in range(n_cl)]
-        for i in range(n_cl):
-            records.append({
-                "session ID": sid,
-                "order": order[i],
-                "page 1 (main category)": cat[i],
-                "page 2 (clothing model)": model_codes[i],
-                "colour": color[i],
-                "price": round(float(price[i]), 2),
-                "page": page[i],
-                "model photography": photo[i],
-                "month": mes[i],
-                "price 2": p2[i],
-            })
-    return pd.DataFrame(records)
 
 
 # ══════════════════════════════════════════════════════════════════
 #  ENTRENAMIENTO
 # ══════════════════════════════════════════════════════════════════
-@st.cache_data(show_spinner=False)
-def entrenar_modelo(df_json, algo, n_estimadores, max_depth, test_size):
-    """Entrenamiento cacheado para no re-ejecutar en cada interacción."""
-    df = pd.read_json(io.StringIO(df_json))
-    clf = ClasificadorIntención()
-    clf.df = df
-    clf._construir_sesiones()
-    metricas = clf.entrenar(
-        algoritmo=algo,
-        n_estimators=n_estimadores,
-        max_depth=max_depth,
-        test_size=test_size / 100
-    )
-    return clf, metricas
-
-
 if entrenar_btn and df_raw is not None:
     with st.spinner("Entrenando modelo..."):
         algo_key = {"Gradient Boosting": "GB",
@@ -241,12 +179,11 @@ if entrenar_btn and df_raw is not None:
         clf, metricas = entrenar_modelo(
             df_raw.to_json(), algo_key, n_est, max_d, test_s
         )
-        st.session_state.clf      = clf
-        st.session_state.metricas = metricas
-        st.session_state.sesiones = clf.sesiones
+        st.session_state.clf       = clf
+        st.session_state.metricas  = metricas
+        st.session_state.sesiones  = clf.sesiones
         st.session_state.entrenado = True
     st.rerun()
-
 elif entrenar_btn and df_raw is None:
     st.sidebar.error("Primero carga los datos.")
 
@@ -263,7 +200,7 @@ st.markdown("""
 
 
 # ══════════════════════════════════════════════════════════════════
-#  PESTAÑAS PRINCIPALES
+#  PESTAÑAS
 # ══════════════════════════════════════════════════════════════════
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Métricas del modelo",
@@ -274,34 +211,24 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 
-# ──────────────────────────────────────────────────────────────────
-# TAB 1 – MÉTRICAS
-# ──────────────────────────────────────────────────────────────────
+# ── TAB 1: MÉTRICAS ───────────────────────────────────────────────
 with tab1:
     if not st.session_state.entrenado:
         st.info("👈 Carga el dataset y presiona **▶ Entrenar modelo** en el panel lateral.")
     else:
-        m = st.session_state.metricas
+        m   = st.session_state.metricas
         ses = st.session_state.sesiones
 
-        # KPIs
         c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("AUC-ROC (CV 5-fold)", f"{m['cv_mean']:.3f}",
-                      f"± {m['cv_std']:.3f}")
-        with c2:
-            st.metric("Accuracy (test)", f"{m['accuracy']*100:.1f}%")
-        with c3:
-            st.metric("AUC-ROC (test)", f"{m['auc']:.3f}")
-        with c4:
-            n_alta = int(ses["alta_intencion"].sum())
-            st.metric("Alta intención",
-                      f"{n_alta:,} / {len(ses):,}",
-                      f"{ses['alta_intencion'].mean()*100:.1f}%")
+        c1.metric("AUC-ROC (CV 5-fold)", f"{m['cv_mean']:.3f}", f"± {m['cv_std']:.3f}")
+        c2.metric("Accuracy (test)",     f"{m['accuracy']*100:.1f}%")
+        c3.metric("AUC-ROC (test)",      f"{m['auc']:.3f}")
+        n_alta = int(ses["alta_intencion"].sum())
+        c4.metric("Alta intención",
+                  f"{n_alta:,} / {len(ses):,}",
+                  f"{ses['alta_intencion'].mean()*100:.1f}%")
 
         st.divider()
-
-        # Gráficos fila 1
         col_a, col_b = st.columns(2)
         with col_a:
             st.markdown("##### Curva ROC")
@@ -311,26 +238,19 @@ with tab1:
             st.pyplot(fig_confusion(m), use_container_width=True)
 
         st.divider()
-
-        # Comparativa de modelos
         st.markdown("##### Comparativa de algoritmos (AUC-ROC · CV 5-fold)")
-        st.pyplot(fig_modelos(m["resultados_comparativa"]),
-                  use_container_width=True)
+        st.pyplot(fig_modelos(m["resultados_comparativa"]), use_container_width=True)
 
-        # Reporte de texto
         with st.expander("📋 Reporte de clasificación completo"):
             st.code(m["reporte"], language="text")
 
 
-# ──────────────────────────────────────────────────────────────────
-# TAB 2 – DISTRIBUCIONES
-# ──────────────────────────────────────────────────────────────────
+# ── TAB 2: DISTRIBUCIONES ─────────────────────────────────────────
 with tab2:
     if not st.session_state.entrenado:
         st.info("👈 Entrena el modelo primero.")
     else:
         ses = st.session_state.sesiones
-
         col_a, col_b = st.columns(2)
 
         with col_a:
@@ -344,8 +264,7 @@ with tab2:
             ax_cl.axvline(ses["n_clicks"].median(), color="#E63946",
                           linestyle="--", linewidth=1.5,
                           label=f"Mediana={ses['n_clicks'].median():.0f}")
-            ax_cl.set_xlabel("N° clicks")
-            ax_cl.set_ylabel("Sesiones")
+            ax_cl.set_xlabel("N° clicks"); ax_cl.set_ylabel("Sesiones")
             ax_cl.legend(fontsize=9)
             ax_cl.spines[["top","right"]].set_visible(False)
             fig_cl.tight_layout()
@@ -354,14 +273,13 @@ with tab2:
         with col_b:
             st.markdown("##### Precio medio por segmento")
             fig_pr, ax_pr = plt.subplots(figsize=(5, 3))
-            alta = ses[ses["alta_intencion"]==1]["precio_medio"]
-            baja = ses[ses["alta_intencion"]==0]["precio_medio"]
-            ax_pr.hist(alta.clip(upper=80), bins=20, alpha=.7,
-                       color="#2E86AB", label="Alta intención", edgecolor="white")
-            ax_pr.hist(baja.clip(upper=80), bins=20, alpha=.7,
-                       color="#F18F01", label="Baja intención", edgecolor="white")
-            ax_pr.set_xlabel("Precio medio (USD)")
-            ax_pr.set_ylabel("Sesiones")
+            ax_pr.hist(ses[ses["alta_intencion"]==1]["precio_medio"].clip(upper=80),
+                       bins=20, alpha=.7, color="#2E86AB",
+                       label="Alta intención", edgecolor="white")
+            ax_pr.hist(ses[ses["alta_intencion"]==0]["precio_medio"].clip(upper=80),
+                       bins=20, alpha=.7, color="#F18F01",
+                       label="Baja intención", edgecolor="white")
+            ax_pr.set_xlabel("Precio medio (USD)"); ax_pr.set_ylabel("Sesiones")
             ax_pr.legend(fontsize=9)
             ax_pr.spines[["top","right"]].set_visible(False)
             fig_pr.tight_layout()
@@ -374,13 +292,11 @@ with tab2:
             ax_reb.hist(ses[ses["alta_intencion"]==0]["pct_rebajas"], bins=15,
                         alpha=.7, color="#F18F01", label="Baja", edgecolor="white")
             ax_reb.set_xlabel("Proporción clicks en rebajas")
-            ax_reb.set_ylabel("Sesiones")
-            ax_reb.legend(fontsize=9)
+            ax_reb.set_ylabel("Sesiones"); ax_reb.legend(fontsize=9)
             ax_reb.spines[["top","right"]].set_visible(False)
             fig_reb.tight_layout()
             st.pyplot(fig_reb, use_container_width=True)
 
-        # Estadísticas descriptivas
         with st.expander("📊 Estadísticas descriptivas por segmento"):
             cols_show = ["n_clicks","n_modelos_uniq","precio_medio",
                          "pct_rebajas","tasa_exploracion","engagement_score"]
@@ -389,9 +305,7 @@ with tab2:
             st.dataframe(df_desc, use_container_width=True)
 
 
-# ──────────────────────────────────────────────────────────────────
-# TAB 3 – VARIABLES
-# ──────────────────────────────────────────────────────────────────
+# ── TAB 3: VARIABLES ──────────────────────────────────────────────
 with tab3:
     if not st.session_state.entrenado:
         st.info("👈 Entrena el modelo primero.")
@@ -400,20 +314,18 @@ with tab3:
         ses = st.session_state.sesiones
 
         col_a, col_b = st.columns([3, 2])
-
         with col_a:
             st.markdown("##### Importancia de variables (Top 15)")
             st.pyplot(fig_importancias(m), use_container_width=True)
-
         with col_b:
-            st.markdown("##### Descripción de los 5 nuevos atributos")
+            st.markdown("##### 5 nuevos atributos (Feature Engineering)")
             fe_info = [
                 ("★ Tasa exploración",   "n_modelos / n_clicks",
-                 "Productos distintos por click. Alto → usuario selectivo y comprometido."),
+                 "Productos distintos por click. Alto → usuario selectivo."),
                 ("★ Concentración cat.", "max(pct_cat_i)",
-                 "Dominancia de una categoría. Alto → sesión muy enfocada."),
+                 "Dominancia de una categoría en la sesión."),
                 ("★ Premium × Depth",   "pct_caro × max_page",
-                 "Sesiones con productos caros en páginas profundas → alta intención premium."),
+                 "Sesiones premium que llegan profundo."),
                 ("★ Colores/Click",      "n_colores / n_clicks",
                  "Diversidad visual por unidad de navegación."),
                 ("★ Engagement Score",  "(clicks/max + page/5)/2",
@@ -421,23 +333,19 @@ with tab3:
             ]
             for nombre, formula, desc in fe_info:
                 with st.container(border=True):
-                    st.markdown(f"**{nombre}**")
-                    st.caption(f"`{formula}`")
-                    st.write(desc)
+                    st.markdown(f"**{nombre}** — `{formula}`")
+                    st.caption(desc)
 
         st.divider()
-
-        # Clustering PCA
         st.markdown("##### Clustering de sesiones (PCA 2D)")
         col_p1, col_p2 = st.columns([2, 1])
         with col_p1:
             st.pyplot(fig_clusters_pca(ses), use_container_width=True)
         with col_p2:
-            st.markdown("**Silhouette por método**")
+            st.markdown("**Silhouette por K**")
             st.pyplot(fig_silhouette(ses), use_container_width=True)
 
-        # Correlación features vs etiqueta
-        with st.expander("🔗 Correlación de features con la etiqueta"):
+        with st.expander("🔗 Correlación features vs etiqueta"):
             feats = ["n_categorias","n_modelos_uniq","n_colores_uniq",
                      "pct_rebajas","precio_medio","pct_sobre_prom",
                      "tasa_exploracion","concentracion_cat","colores_por_click"]
@@ -452,15 +360,12 @@ with tab3:
             st.pyplot(fig_c, use_container_width=True)
 
 
-# ──────────────────────────────────────────────────────────────────
-# TAB 4 – PREDICCIÓN INDIVIDUAL
-# ──────────────────────────────────────────────────────────────────
+# ── TAB 4: PREDICCIÓN INDIVIDUAL ──────────────────────────────────
 with tab4:
     if not st.session_state.entrenado:
         st.info("👈 Entrena el modelo primero.")
     else:
         st.markdown("Ingresa los datos de una sesión para predecir su intención de compra.")
-
         col_form, col_res = st.columns([3, 2])
 
         with col_form:
@@ -468,44 +373,30 @@ with tab4:
                 st.markdown("##### Datos de la sesión")
 
                 r1c1, r1c2, r1c3 = st.columns(3)
-                with r1c1:
-                    n_cat = st.number_input("N° categorías", 1, 4, 2)
-                with r1c2:
-                    n_mod = st.number_input("N° productos únicos", 1, 168, 5)
-                with r1c3:
-                    n_col = st.number_input("N° colores distintos", 1, 14, 3)
+                with r1c1: n_cat = st.number_input("N° categorías",      1, 4,   2)
+                with r1c2: n_mod = st.number_input("N° productos únicos", 1, 168, 5)
+                with r1c3: n_col = st.number_input("N° colores distintos",1, 14,  3)
 
                 r2c1, r2c2, r2c3 = st.columns(3)
-                with r2c1:
-                    pct_reb = st.slider("% rebajas", 0.0, 1.0, 0.05, 0.05)
-                with r2c2:
-                    pct_blu = st.slider("% blusas",  0.0, 1.0, 0.30, 0.05)
-                with r2c3:
-                    pct_pan = st.slider("% pantalones", 0.0, 1.0, 0.40, 0.05)
+                with r2c1: pct_reb = st.slider("% rebajas",    0.0, 1.0, 0.05, 0.05)
+                with r2c2: pct_blu = st.slider("% blusas",     0.0, 1.0, 0.30, 0.05)
+                with r2c3: pct_pan = st.slider("% pantalones", 0.0, 1.0, 0.40, 0.05)
 
                 r3c1, r3c2, r3c3 = st.columns(3)
-                with r3c1:
-                    pct_fal = st.slider("% faldas", 0.0, 1.0, 0.25, 0.05)
-                with r3c2:
-                    precio  = st.number_input("Precio medio (USD)", 10, 100, 44)
-                with r3c3:
-                    rango_p = st.number_input("Rango precios (USD)", 0, 80, 20)
+                with r3c1: pct_fal  = st.slider("% faldas",       0.0, 1.0, 0.25, 0.05)
+                with r3c2: precio   = st.number_input("Precio medio (USD)", 10, 100, 44)
+                with r3c3: rango_p  = st.number_input("Rango precios (USD)", 0, 80, 20)
 
                 r4c1, r4c2, r4c3 = st.columns(3)
-                with r4c1:
-                    pct_caro = st.slider("% precio alto", 0.0, 1.0, 0.50, 0.05)
-                with r4c2:
-                    pct_foto = st.slider("% foto frente", 0.0, 1.0, 0.75, 0.05)
+                with r4c1: pct_caro = st.slider("% precio alto",  0.0, 1.0, 0.50, 0.05)
+                with r4c2: pct_foto = st.slider("% foto frente",  0.0, 1.0, 0.75, 0.05)
                 with r4c3:
-                    mes = st.selectbox("Mes", [4,5,6,7,8],
+                    mes = st.selectbox("Mes", [4,5,6,7,8], index=2,
                                        format_func=lambda x: {4:"Abril",5:"Mayo",
                                                                6:"Junio",7:"Julio",
-                                                               8:"Agosto"}[x],
-                                       index=2)
-
+                                                               8:"Agosto"}[x])
                 submitted = st.form_submit_button(
-                    "🔮 Clasificar sesión",
-                    type="primary", use_container_width=True
+                    "🔮 Clasificar sesión", type="primary", use_container_width=True
                 )
 
         with col_res:
@@ -513,18 +404,12 @@ with tab4:
                 clf = st.session_state.clf
                 n_cl_est = 7
                 datos = {
-                    "n_categorias":    n_cat,
-                    "n_modelos_uniq":  n_mod,
-                    "n_colores_uniq":  n_col,
-                    "pct_rebajas":     pct_reb,
-                    "pct_blusas":      pct_blu,
-                    "pct_pantalones":  pct_pan,
-                    "pct_faldas":      pct_fal,
-                    "precio_medio":    precio,
-                    "precio_rango":    rango_p,
-                    "pct_sobre_prom":  pct_caro,
-                    "pct_foto_frente": pct_foto,
-                    "mes":             mes,
+                    "n_categorias": n_cat, "n_modelos_uniq": n_mod,
+                    "n_colores_uniq": n_col, "pct_rebajas": pct_reb,
+                    "pct_blusas": pct_blu, "pct_pantalones": pct_pan,
+                    "pct_faldas": pct_fal, "precio_medio": precio,
+                    "precio_rango": rango_p, "pct_sobre_prom": pct_caro,
+                    "pct_foto_frente": pct_foto, "mes": mes,
                     "tasa_exploracion":  n_mod / max(n_cl_est, 1),
                     "concentracion_cat": max(pct_reb, pct_blu, pct_pan, pct_fal),
                     "colores_por_click": n_col / max(n_cl_est, 1),
@@ -537,8 +422,7 @@ with tab4:
                     <div class="result-box result-alta">
                       <div class="result-title" style="color:#065f46">🛒 ALTA INTENCIÓN</div>
                       <div class="result-prob">Probabilidad: <strong>{prob*100:.1f}%</strong></div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    </div>""", unsafe_allow_html=True)
                     st.progress(float(prob))
                     st.success("**Acciones recomendadas:**  \n"
                                "• Mostrar botón 'Comprar ahora' prominente  \n"
@@ -550,8 +434,7 @@ with tab4:
                     <div class="result-box result-baja">
                       <div class="result-title" style="color:#475569">👀 BAJA INTENCIÓN</div>
                       <div class="result-prob">Probabilidad alta: <strong>{prob*100:.1f}%</strong></div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    </div>""", unsafe_allow_html=True)
                     st.progress(float(prob))
                     st.info("**Acciones recomendadas:**  \n"
                             "• Mostrar contenido inspiracional  \n"
@@ -568,36 +451,30 @@ with tab4:
             else:
                 st.markdown("##### Resultado")
                 st.markdown("""
-                <div style="border:2px dashed #cbd5e1; border-radius:12px;
-                            padding:2rem; text-align:center; color:#94a3b8">
+                <div style="border:2px dashed #cbd5e1;border-radius:12px;
+                            padding:2rem;text-align:center;color:#94a3b8">
                   <div style="font-size:2rem">?</div>
-                  <div>Completa el formulario y presiona<br><strong>Clasificar sesión</strong></div>
-                </div>
-                """, unsafe_allow_html=True)
+                  <div>Completa el formulario y presiona<br>
+                  <strong>Clasificar sesión</strong></div>
+                </div>""", unsafe_allow_html=True)
 
 
-# ──────────────────────────────────────────────────────────────────
-# TAB 5 – PREDICCIÓN MASIVA
-# ──────────────────────────────────────────────────────────────────
+# ── TAB 5: PREDICCIÓN MASIVA ──────────────────────────────────────
 with tab5:
     if not st.session_state.entrenado:
         st.info("👈 Entrena el modelo primero.")
     else:
-        st.markdown(
-            "Sube un CSV con el mismo formato del dataset original para predecir "
-            "todas sus sesiones de una vez."
-        )
+        st.markdown("Sube un CSV con el mismo formato para predecir todas las sesiones.")
 
         lote_file = st.file_uploader(
-            "Selecciona el CSV de lote",
-            type=["csv"], key="lote_uploader",
+            "Selecciona el CSV de lote", type=["csv"], key="lote_uploader",
             help="Mismo formato que e-shop_clothing_2008.csv (sep=;)"
         )
 
         if lote_file:
             with st.spinner("Procesando sesiones..."):
                 clf = st.session_state.clf
-                df_lote = pd.read_csv(lote_file, sep=";")
+                df_lote  = pd.read_csv(lote_file, sep=";")
                 resultado = clf.predecir_lote(df_lote)
 
             n      = len(resultado)
@@ -605,14 +482,10 @@ with tab5:
 
             c1, c2, c3 = st.columns(3)
             c1.metric("Sesiones procesadas", f"{n:,}")
-            c2.metric("Alta intención",      f"{n_alta:,}",
-                      f"{n_alta/n*100:.1f}%")
-            c3.metric("Baja intención",      f"{n-n_alta:,}",
-                      f"{(n-n_alta)/n*100:.1f}%")
+            c2.metric("Alta intención",  f"{n_alta:,}", f"{n_alta/n*100:.1f}%")
+            c3.metric("Baja intención",  f"{n-n_alta:,}", f"{(n-n_alta)/n*100:.1f}%")
 
             st.divider()
-
-            # Filtro interactivo
             filtro = st.selectbox(
                 "Mostrar",
                 ["Todas las sesiones","Solo alta intención","Solo baja intención"]
@@ -623,10 +496,9 @@ with tab5:
             elif filtro == "Solo baja intención":
                 df_show = df_show[df_show["prediccion"]=="Baja Intención"]
 
-            # Colorear
             def color_pred(val):
                 if val == "Alta Intención":
-                    return "background-color:#d1fae5; color:#065f46; font-weight:600"
+                    return "background-color:#d1fae5;color:#065f46;font-weight:600"
                 return "color:#475569"
 
             st.dataframe(
@@ -635,12 +507,8 @@ with tab5:
                 use_container_width=True, height=380
             )
 
-            # Descarga
             csv_out = resultado.to_csv(index=False, sep=";").encode("utf-8-sig")
             st.download_button(
-                "💾 Descargar resultados (CSV)",
-                data=csv_out,
-                file_name="predicciones_lote.csv",
-                mime="text/csv",
-                type="primary"
+                "💾 Descargar resultados (CSV)", data=csv_out,
+                file_name="predicciones_lote.csv", mime="text/csv", type="primary"
             )
