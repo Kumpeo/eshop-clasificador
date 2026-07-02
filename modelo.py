@@ -101,7 +101,7 @@ class ClasificadorIntención:
         elif algoritmo == "RF":
             self.modelo = RandomForestClassifier(
                 n_estimators=n_estimators, max_depth=max_depth,
-                random_state=42, n_jobs=-1
+                random_state=42, n_jobs=1
             )
         else:  # DT
             self.modelo = DecisionTreeClassifier(
@@ -124,14 +124,12 @@ class ClasificadorIntención:
         comparativa = {}
         for nom, mod in [
             ("Árbol de\nDecisión", DecisionTreeClassifier(max_depth=max_depth, random_state=42)),
-            ("Random\nForest",     RandomForestClassifier(n_estimators=n_estimators,
-                                                           max_depth=max_depth,
-                                                           random_state=42, n_jobs=-1)),
-            ("Gradient\nBoosting", GradientBoostingClassifier(n_estimators=n_estimators,
-                                                               max_depth=max_depth,
+            ("Random\nForest",     RandomForestClassifier(n_estimators=30, max_depth=4,
+                                                           random_state=42, n_jobs=1)),
+            ("Gradient\nBoosting", GradientBoostingClassifier(n_estimators=30, max_depth=4,
                                                                random_state=42)),
         ]:
-            cs = cross_val_score(mod, X, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+            cs = cross_val_score(mod, X, y, cv=cv, scoring="roc_auc", n_jobs=1)
             comparativa[nom] = {"cv_mean": cs.mean(), "cv_std": cs.std()}
 
         self.metricas = {

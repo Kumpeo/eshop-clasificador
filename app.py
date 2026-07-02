@@ -145,8 +145,8 @@ with st.sidebar:
     )
 
     with st.expander("⚙️ Hiperparámetros"):
-        n_est  = st.slider("N° estimadores",    50, 300, 100, 50)
-        max_d  = st.slider("Profundidad máxima", 2,  10,   4)
+        n_est  = st.slider("N° estimadores",    20, 100, 50, 10)
+        max_d  = st.slider("Profundidad máxima", 2,  6,   4)
         test_s = st.slider("% datos de test",   10,  40,  30,  5)
 
     entrenar_btn = st.button("▶ Entrenar modelo", type="primary",
